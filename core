@@ -1,0 +1,492 @@
+import React, { useState, useEffect, useMemo, useRef } from 'react';
+import { 
+  Menu, X, BookOpen, Quote as QuoteIcon, 
+  MessageSquare, Calendar, ChevronRight, Send, 
+  Heart, Github, Twitter, Instagram, ArrowRight,
+  User, Map, Home, Sun, Moon, Leaf, Cloud, 
+  Music, Sparkles, RefreshCw, Info, Flower,
+  Wind, Coffee, PenTool, History, Volume2, VolumeX,
+  Wand2, Stars, Zap, Camera, Mic, Volume1, Loader2
+} from 'lucide-react';
+
+// --- API Configuration ---
+const apiKey = ""; // The execution environment provides the key at runtime
+
+// Exponential Backoff helper
+const fetchWithRetry = async (url, options, retries = 5, backoff = 1000) => {
+  try {
+    const response = await fetch(url, options);
+    if (!response.ok) throw new Error(`HTTP error! status: ${response.status}`);
+    return await response.json();
+  } catch (error) {
+    if (retries > 0) {
+      await new Promise(resolve => setTimeout(resolve, backoff));
+      return fetchWithRetry(url, options, retries - 1, backoff * 2);
+    }
+    throw error;
+  }
+};
+
+// PCM to WAV Conversion Utility for TTS
+const pcmToWav = (pcmData, sampleRate) => {
+  const buffer = new ArrayBuffer(44 + pcmData.length * 2);
+  const view = new DataView(buffer);
+  const writeString = (offset, string) => {
+    for (let i = 0; i < string.length; i++) {
+      view.setUint8(offset + i, string.charCodeAt(i));
+    }
+  };
+  writeString(0, 'RIFF');
+  view.setUint32(4, 32 + pcmData.length * 2, true);
+  writeString(8, 'WAVE');
+  writeString(12, 'fmt ');
+  view.setUint32(16, 16, true);
+  view.setUint16(20, 1, true);
+  view.setUint16(22, 1, true);
+  view.setUint32(24, sampleRate, true);
+  view.setUint32(28, sampleRate * 2, true);
+  view.setUint16(32, 2, true);
+  view.setUint16(34, 16, true);
+  writeString(36, 'data');
+  view.setUint32(40, pcmData.length * 2, true);
+  for (let i = 0; i < pcmData.length; i++) {
+    view.setInt16(44 + i * 2, pcmData[i], true);
+  }
+  return new Blob([buffer], { type: 'audio/wav' });
+};
+
+// --- Data ---
+const ON_THIS_DAY = {
+  date: "May 4th",
+  year: "2019",
+  event: "Started the first draft of 'The Summer of Cicadas' while sitting under an old oak tree.",
+  mood: "Hopeful"
+};
+
+const JOURNEY_PHASES = [
+  { year: "1998", title: "The Beginning", desc: "Born in a quiet town where the wind always smelled like rain.", category: "Early Life" },
+  { year: "2010", title: "The Curious Student", desc: "Found my first journal. I realized that words could build worlds.", category: "School" },
+  { year: "2018", title: "Crossing the Valley", desc: "A difficult period that taught me the strength of silence and resilience.", category: "Struggles" },
+  { year: "2024", title: "The Present Garden", desc: "Cultivating stories and helping others find their own voice.", category: "Current" }
+];
+
+const FLOWER_TYPES = {
+  "Philosophy": { color: "#FF9AA2", type: "tulip" },
+  "Memories": { color: "#C7CEEA", type: "daisy" },
+  "Life Advice": { color: "#FFDAC1", type: "sunflower" },
+  "Unknown": { color: "#E2F0CB", type: "lavender" }
+};
+
+const App = () => {
+  const [view, setView] = useState('home');
+  const [isNight, setIsNight] = useState(false);
+  const [isMuted, setIsMuted] = useState(true);
+  const [isMenuOpen, setIsMenuOpen] = useState(false);
+  
+  // AI States
+  const [aiLoading, setAiLoading] = useState(false);
+  const [activePrompt, setActivePrompt] = useState("Click the button below to generate a ✨ special reflection prompt...");
+  const [wisdom, setWisdom] = useState("");
+  const [newComment, setNewComment] = useState("");
+  const [analyzedMemory, setAnalyzedMemory] = useState("");
+  
+  const [comments, setComments] = useState([
+    { name: "Sophie", text: "This place feels so peaceful. Thank you for sharing, Allen.", likes: 12, category: "Memories" },
+    { name: "Haku", text: "The garden visualization is such a beautiful touch.", likes: 8, category: "Philosophy" }
+  ]);
+
+  const audioRef = useRef(null);
+
+  // Derive garden from comments
+  const gardenPlants = useMemo(() => {
+    return comments.map((c, i) => ({
+      id: i,
+      color: FLOWER_TYPES[c.category || "Unknown"]?.color || "#E2F0CB",
+      size: i === 0 ? "scale-125" : "scale-100",
+      delay: `${i * 0.2}s`,
+      label: c.text.substring(0, 20) + "..."
+    })).slice(0, 8);
+  }, [comments]);
+
+  // --- Gemini API Calls ---
+
+  const generateAIPrompt = async () => {
+    setAiLoading(true);
+    const systemPrompt = "You are a thoughtful, introspective writing assistant. Generate a single, profound reflection prompt for a personal journal. The tone should be calm, nostalgic, and Studio Ghibli-inspired. Keep it to one sentence.";
+    try {
+      const result = await fetchWithRetry(
+        `https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash-preview-09-2025:generateContent?key=${apiKey}`,
+        {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ contents: [{ parts: [{ text: "Give me a new prompt." }] }], systemInstruction: { parts: [{ text: systemPrompt }] } })
+        }
+      );
+      const text = result.candidates?.[0]?.content?.parts?.[0]?.text;
+      if (text) setActivePrompt(text.trim());
+    } catch (err) {
+      setActivePrompt("The wind is quiet today. Try again in a moment.");
+    } finally {
+      setAiLoading(false);
+    }
+  };
+
+  const speakWisdom = async (textToSpeak) => {
+    if (!textToSpeak) return;
+    setAiLoading(true);
+    try {
+      const response = await fetchWithRetry(
+        `https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash-preview-tts:generateContent?key=${apiKey}`,
+        {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({
+            contents: [{ parts: [{ text: `Say gently and calmly: ${textToSpeak}` }] }],
+            generationConfig: {
+              responseModalities: ["AUDIO"],
+              speechConfig: { voiceConfig: { prebuiltVoiceConfig: { voiceName: "Kore" } } }
+            },
+            model: "gemini-2.5-flash-preview-tts"
+          })
+        }
+      );
+
+      const audioPart = response.candidates[0].content.parts[0];
+      const pcmBase64 = audioPart.inlineData.data;
+      const mimeType = audioPart.inlineData.mimeType;
+      const sampleRate = parseInt(mimeType.split('rate=')[1]) || 24000;
+      
+      const pcmBytes = Uint8Array.from(atob(pcmBase64), c => c.charCodeAt(0));
+      const pcm16 = new Int16Array(pcmBytes.buffer);
+      const wavBlob = pcmToWav(pcm16, sampleRate);
+      const audioUrl = URL.createObjectURL(wavBlob);
+      
+      if (audioRef.current) {
+        audioRef.current.src = audioUrl;
+        audioRef.current.play();
+      }
+    } catch (err) {
+      console.error("TTS Error:", err);
+    } finally {
+      setAiLoading(false);
+    }
+  };
+
+  const handleImageUpload = async (e) => {
+    const file = e.target.files[0];
+    if (!file) return;
+    setAiLoading(true);
+    
+    const reader = new FileReader();
+    reader.onloadend = async () => {
+      const base64Data = reader.result.split(',')[1];
+      const systemPrompt = "You are a poetic narrator. Look at this image and describe the feeling or memory it evokes in a nostalgic Studio Ghibli style. Keep it to 2-3 sentences. Focus on sensory details like light, air, and emotion.";
+      
+      try {
+        const result = await fetchWithRetry(
+          `https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash-preview-09-2025:generateContent?key=${apiKey}`,
+          {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({
+              contents: [{
+                role: "user",
+                parts: [
+                  { text: "Analyze this memory." },
+                  { inlineData: { mimeType: file.type, data: base64Data } }
+                ]
+              }],
+              systemInstruction: { parts: [{ text: systemPrompt }] }
+            })
+          }
+        );
+        const text = result.candidates?.[0]?.content?.parts?.[0]?.text;
+        if (text) setAnalyzedMemory(text.trim());
+      } catch (err) {
+        setAnalyzedMemory("The memory is a bit blurry... but the warmth remains.");
+      } finally {
+        setAiLoading(false);
+      }
+    };
+    reader.readAsDataURL(file);
+  };
+
+  const askTheWind = async () => {
+    setAiLoading(true);
+    const systemPrompt = "You are the 'Voice of the Wind' in Allen's digital garden. Provide a short piece of calm, Ghibli-esque wisdom about life and patience. Max 20 words.";
+    try {
+      const result = await fetchWithRetry(
+        `https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash-preview-09-2025:generateContent?key=${apiKey}`,
+        {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ contents: [{ parts: [{ text: "Give me wisdom." }] }], systemInstruction: { parts: [{ text: systemPrompt }] } })
+        }
+      );
+      const text = result.candidates?.[0]?.content?.parts?.[0]?.text;
+      if (text) setWisdom(text.trim());
+    } catch (err) {
+      setWisdom("Listen closely... the wind is whispering somewhere else right now.");
+    } finally {
+      setAiLoading(false);
+    }
+  };
+
+  const handlePost = async () => {
+    if (!newComment.trim()) return;
+    setAiLoading(true);
+    const systemPrompt = "Categorize this text into exactly one of these three words: 'Philosophy', 'Memories', or 'Life Advice'. If unsure, pick 'Philosophy'. Output only the word.";
+    let category = "Philosophy";
+    try {
+      const result = await fetchWithRetry(
+        `https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash-preview-09-2025:generateContent?key=${apiKey}`,
+        {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ contents: [{ parts: [{ text: newComment }] }], systemInstruction: { parts: [{ text: systemPrompt }] } })
+        }
+      );
+      const text = result.candidates?.[0]?.content?.parts?.[0]?.text?.trim();
+      if (["Philosophy", "Memories", "Life Advice"].includes(text)) category = text;
+    } catch (err) { console.error(err); }
+
+    setComments([{ name: "Guest", text: newComment, likes: 0, category }, ...comments]);
+    setNewComment("");
+    setAiLoading(false);
+  };
+
+  const themeClasses = isNight 
+    ? "bg-[#1a2533] text-slate-200 transition-colors duration-1000" 
+    : "bg-[#F5E9DC] text-slate-800 transition-colors duration-1000";
+
+  return (
+    <div className={`min-h-screen font-serif ${themeClasses} overflow-x-hidden relative selection:bg-sage-200/50`}>
+      <audio ref={audioRef} className="hidden" />
+      
+      {/* Ghibli Ambient Elements */}
+      <div className="fixed inset-0 pointer-events-none z-0">
+        {[...Array(15)].map((_, i) => (
+          <div key={i} className={`absolute animate-float ${isNight ? 'bg-amber-200 w-1 h-1 rounded-full blur-[1px]' : 'text-sage-300/30'}`}
+            style={{ left: `${Math.random() * 100}%`, top: `${Math.random() * 100}%`, animationDelay: `${Math.random() * 5}s`, animationDuration: `${15 + Math.random() * 20}s` }}>
+            {!isNight && <Leaf size={14 + Math.random() * 10} />}
+          </div>
+        ))}
+        {!isNight && (
+          <div className="opacity-40">
+            <Cloud className="absolute top-20 -left-40 text-white animate-drift" size={180} style={{ animationDuration: '80s' }} />
+            <Cloud className="absolute top-80 -left-40 text-white animate-drift" size={120} style={{ animationDuration: '110s', animationDelay: '15s' }} />
+          </div>
+        )}
+      </div>
+
+      {/* Navigation */}
+      <nav className={`fixed top-0 w-full z-50 px-6 py-4 flex justify-between items-center transition-all ${isNight ? 'bg-[#1a2533]/80 border-slate-700' : 'bg-[#F5E9DC]/80 border-sage-200'} backdrop-blur-md border-b`}>
+        <button onClick={() => setView('home')} className="flex items-center space-x-2 group">
+          <div className={`w-10 h-10 rounded-full flex items-center justify-center transition-all ${isNight ? 'bg-amber-900/50 text-amber-200' : 'bg-sage-200 text-sage-700'}`}>
+            <Flower size={20} />
+          </div>
+          <span className="text-xl font-bold tracking-tight">Allen</span>
+        </button>
+
+        <div className="hidden md:flex items-center space-x-6">
+          {['home', 'garden', 'journey', 'prompts', 'community'].map((v) => (
+            <button key={v} onClick={() => setView(v)} className={`capitalize text-sm font-medium transition-all ${view === v ? 'text-sage-600 font-bold scale-105' : 'opacity-60 hover:opacity-100'}`}>
+              {v}
+            </button>
+          ))}
+          <div className="h-4 w-[1px] bg-slate-300 mx-2"></div>
+          <button onClick={() => setIsNight(!isNight)} className="p-2 rounded-full hover:bg-black/5 transition-colors">
+            {isNight ? <Sun size={18} /> : <Moon size={18} />}
+          </button>
+          <div className="flex items-center space-x-2 bg-black/5 px-3 py-1.5 rounded-full">
+             <button onClick={() => setIsMuted(!isMuted)} className="hover:scale-110 transition-transform">
+              {isMuted ? <VolumeX size={16} /> : <Volume2 size={16} className="text-sage-600" />}
+            </button>
+          </div>
+        </div>
+
+        <button className="md:hidden" onClick={() => setIsMenuOpen(!isMenuOpen)}>
+          {isMenuOpen ? <X /> : <Menu />}
+        </button>
+      </nav>
+
+      {/* Main Content */}
+      <main className="pt-32 pb-24 px-6 max-w-5xl mx-auto relative z-10">
+        
+        {view === 'home' && (
+          <div className="space-y-24 animate-in fade-in duration-700">
+            <section className="text-center py-12 relative">
+              <h1 className={`text-6xl md:text-8xl font-black mb-8 leading-tight tracking-tighter ${isNight ? 'text-white' : 'text-slate-900'}`}>
+                Stories <span className="text-sage-600">Breathe</span> <br /> in Silence.
+              </h1>
+              <p className="text-xl opacity-70 max-w-2xl mx-auto mb-10 font-sans leading-relaxed">
+                Welcome to my digital garden. Use ✨ AI to scan your photos or listen to the wind's secrets.
+              </p>
+              
+              <div className={`inline-flex items-start space-x-4 p-6 rounded-3xl text-left max-w-md mx-auto border transition-all hover:shadow-lg ${isNight ? 'bg-slate-800/40 border-slate-700' : 'bg-white border-sage-100 shadow-sm'}`}>
+                <div className="p-3 bg-sage-100 text-sage-600 rounded-2xl">
+                  <History size={24} />
+                </div>
+                <div>
+                  <div className="flex items-center space-x-2 mb-1">
+                    <span className="text-xs font-bold uppercase tracking-widest text-sage-600">On This Day — {ON_THIS_DAY.date}</span>
+                    <span className="text-[10px] bg-sage-50 px-2 py-0.5 rounded-full text-sage-700">{ON_THIS_DAY.year}</span>
+                  </div>
+                  <p className="text-sm italic opacity-80 leading-relaxed">"{ON_THIS_DAY.event}"</p>
+                </div>
+              </div>
+            </section>
+          </div>
+        )}
+
+        {view === 'garden' && (
+          <div className="text-center animate-in zoom-in-95 duration-700 space-y-16">
+            <div>
+              <h2 className="text-4xl font-bold mb-4">Memory Garden</h2>
+              <p className="opacity-60 mb-12">Visualize your journey through the flowers and ✨ AI scanning.</p>
+              
+              <div className={`relative h-[300px] w-full rounded-[3rem] overflow-hidden flex items-end justify-center px-12 ${isNight ? 'bg-slate-900/40' : 'bg-white/40 shadow-inner'}`}>
+                <div className="flex items-end justify-around w-full relative z-10">
+                  {gardenPlants.map((p) => (
+                    <div key={p.id} className={`relative flex flex-col items-center group animate-sway transition-transform ${p.size}`} style={{ animationDelay: p.delay }}>
+                      <div className="relative">
+                        <div className="w-8 h-8 rounded-full blur-[2px]" style={{ backgroundColor: p.color }}></div>
+                        <div className="absolute inset-0 flex items-center justify-center"><Flower size={24} style={{ color: p.color }} /></div>
+                      </div>
+                      <div className={`w-1 h-20 md:h-32 ${isNight ? 'bg-emerald-800' : 'bg-emerald-400'} rounded-full`}></div>
+                    </div>
+                  ))}
+                </div>
+              </div>
+            </div>
+
+            {/* AI Image Memory Scanner */}
+            <div className={`p-8 rounded-[3rem] border border-dashed ${isNight ? 'border-slate-700 bg-slate-800/20' : 'border-sage-200 bg-white/40'}`}>
+              <div className="flex flex-col items-center space-y-6">
+                <div className="flex items-center space-x-4">
+                   <div className="p-4 bg-sage-100 text-sage-600 rounded-full"><Camera size={32} /></div>
+                   <div className="text-left">
+                     <h3 className="text-xl font-bold">✨ Memory Scanner</h3>
+                     <p className="text-sm opacity-60">Upload a photo to see the story it hides.</p>
+                   </div>
+                </div>
+                
+                <input type="file" id="memory-upload" className="hidden" accept="image/*" onChange={handleImageUpload} />
+                <label htmlFor="memory-upload" className="bg-sage-600 hover:bg-sage-700 text-white px-8 py-3 rounded-full font-bold cursor-pointer transition-all shadow-lg flex items-center space-x-2">
+                  <Stars size={18} />
+                  <span>Choose a Photo</span>
+                </label>
+
+                {aiLoading && <div className="flex items-center space-x-2 text-sage-600"><Loader2 className="animate-spin" /><span>Consulting the spirits...</span></div>}
+                
+                {analyzedMemory && !aiLoading && (
+                  <div className="max-w-xl animate-in fade-in slide-in-from-top-4">
+                    <p className="text-lg italic font-serif leading-relaxed text-sage-700">"{analyzedMemory}"</p>
+                  </div>
+                )}
+              </div>
+            </div>
+
+            <div className="flex flex-col items-center space-y-6">
+              <div className="flex space-x-4">
+                <button onClick={askTheWind} disabled={aiLoading} className="bg-amber-100 text-amber-700 px-6 py-3 rounded-full font-bold flex items-center space-x-2 hover:bg-amber-200 transition-colors shadow-sm disabled:opacity-50">
+                  <Wind size={18} />
+                  <span>✨ Ask the Wind for Wisdom</span>
+                </button>
+                {wisdom && (
+                  <button onClick={() => speakWisdom(wisdom)} disabled={aiLoading} className="bg-indigo-100 text-indigo-700 p-3 rounded-full hover:bg-indigo-200 transition-colors disabled:opacity-50">
+                    <Volume1 size={24} />
+                  </button>
+                )}
+              </div>
+              {wisdom && <p className="text-xl italic text-amber-600 animate-in fade-in max-w-xl mx-auto">"{wisdom}"</p>}
+            </div>
+          </div>
+        )}
+
+        {view === 'journey' && (
+          <div className="animate-in slide-in-from-bottom-8 duration-700">
+             <div className="text-center mb-16">
+              <h2 className="text-4xl font-bold mb-4">Path of Growth</h2>
+              <div className="h-1 w-20 bg-sage-600 mx-auto rounded-full"></div>
+            </div>
+            <div className="relative border-l-2 border-sage-200 ml-4 space-y-12 max-w-2xl mx-auto">
+              {JOURNEY_PHASES.map((phase, i) => (
+                <div key={i} className="relative pl-8">
+                  <div className={`absolute -left-[9px] top-1 w-4 h-4 rounded-full border-4 ${isNight ? 'bg-amber-400 border-slate-900' : 'bg-sage-600 border-[#F5E9DC]'}`}></div>
+                  <div className={`p-8 rounded-[2rem] border transition-all hover:translate-x-2 hover:shadow-md ${isNight ? 'bg-slate-800/40 border-slate-700' : 'bg-white border-sage-100 shadow-sm'}`}>
+                    <div className="flex items-center justify-between mb-2">
+                      <span className="text-sage-600 font-bold">{phase.year}</span>
+                    </div>
+                    <h3 className="text-2xl font-bold mb-3">{phase.title}</h3>
+                    <p className="opacity-70 leading-relaxed font-sans">{phase.desc}</p>
+                  </div>
+                </div>
+              ))}
+            </div>
+          </div>
+        )}
+
+        {view === 'prompts' && (
+          <div className="max-w-2xl mx-auto py-12 text-center animate-in fade-in">
+            <div className="inline-block p-4 bg-sage-100 text-sage-600 rounded-3xl mb-8"><PenTool size={32} /></div>
+            <h2 className="text-3xl font-bold mb-4">Reflection Prompts</h2>
+            <div className={`p-12 rounded-[3rem] border-2 border-dashed ${isNight ? 'border-slate-700 bg-slate-800/20' : 'border-sage-200 bg-white/40'} min-h-[250px] flex items-center justify-center`}>
+              <h3 className="text-3xl md:text-4xl font-serif italic leading-snug">
+                {aiLoading ? <Zap className="animate-pulse" /> : `"${activePrompt}"`}
+              </h3>
+            </div>
+            <button onClick={generateAIPrompt} disabled={aiLoading} className="mt-12 group flex items-center space-x-3 mx-auto bg-sage-600 hover:bg-sage-700 text-white px-8 py-4 rounded-full font-bold shadow-xl shadow-sage-600/20 transition-all hover:scale-105">
+              <RefreshCw size={20} className={aiLoading ? "animate-spin" : "group-hover:rotate-180 transition-transform duration-500"} />
+              <span>✨ Generate AI Prompt</span>
+            </button>
+          </div>
+        )}
+
+        {view === 'community' && (
+          <div className="max-w-3xl mx-auto animate-in slide-in-from-right-8 duration-500">
+            <h2 className="text-4xl font-bold mb-4">Community Guestbook</h2>
+            <p className="opacity-60 mb-12">Leave a message for others. Use ✨ AI to categorize your soul's bloom.</p>
+            <div className={`mb-12 p-8 rounded-[2.5rem] shadow-xl ${isNight ? 'bg-slate-800' : 'bg-white border border-sage-50'}`}>
+              <textarea value={newComment} onChange={(e) => setNewComment(e.target.value)} className="w-full bg-transparent border-none outline-none resize-none min-h-[120px] text-xl font-serif italic" placeholder="Write a small sentence..."></textarea>
+              <div className="flex justify-end mt-4">
+                <button onClick={handlePost} disabled={aiLoading || !newComment.trim()} className="bg-sage-600 hover:bg-sage-700 text-white px-6 py-3 rounded-full font-bold shadow-lg shadow-sage-600/20 transition-all flex items-center space-x-2">
+                  {aiLoading ? <Stars className="animate-spin" /> : <span>Post Thought</span>}
+                  <Send size={18} />
+                </button>
+              </div>
+            </div>
+            <div className="space-y-6">
+              {comments.map((c, i) => (
+                <div key={i} className={`p-8 rounded-[2rem] border transition-all ${isNight ? 'bg-slate-800/30 border-slate-700' : 'bg-white/40 border-sage-100'}`}>
+                  <div className="flex justify-between items-center mb-4">
+                    <span className="font-bold text-sage-600 flex items-center space-x-2"><User size={16} /><span>{c.name}</span></span>
+                    <span className="text-[10px] text-slate-400 uppercase tracking-tighter mt-1">{c.category} bloom</span>
+                  </div>
+                  <p className="opacity-80 leading-relaxed font-sans">{c.text}</p>
+                </div>
+              ))}
+            </div>
+          </div>
+        )}
+      </main>
+
+      <style>{`
+        @keyframes drift { from { transform: translateX(-200px); } to { transform: translateX(calc(100vw + 200px)); } }
+        @keyframes float { 0% { transform: translate(0, 0) rotate(0deg) scale(1); opacity: 0; } 10% { opacity: 0.6; } 90% { opacity: 0.6; } 100% { transform: translate(40px, -200px) rotate(360deg) scale(0.5); opacity: 0; } }
+        @keyframes sway { 0%, 100% { transform: rotate(-1deg); } 50% { transform: rotate(1deg); } }
+        .animate-drift { animation: drift linear infinite; }
+        .animate-float { animation: float linear infinite; }
+        .animate-sway { animation: sway ease-in-out infinite; animation-duration: 4s; }
+        .bg-sage-200 { background-color: #A8C3A0; }
+        .bg-sage-100 { background-color: #E2F0CB; }
+        .bg-sage-50 { background-color: #f1f5f0; }
+        .text-sage-600 { color: #4b6b45; }
+        .border-sage-200 { border-color: #A8C3A0; }
+        .border-sage-100 { border-color: #d1dfcd; }
+      `}</style>
+    </div>
+  );
+};
+
+export default App;
